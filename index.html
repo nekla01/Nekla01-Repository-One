@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Отзыв в такт · Прототип LASER</title>
+  <style>
+    :root {
+      --bg: #121214;
+      --card: #1E1E22;
+      --yellow: #FCE000;
+      --text: #F5F5F7;
+      --muted: #8E8E93;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex; align-items: center; justify-content: center; transition: background 0.04s linear;
+    }
+    .panel {
+      width: min(92vw, 400px); background: var(--card); border-radius: 24px;
+      padding: 28px 24px; box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+    }
+    .badge {
+      display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+      text-transform: uppercase; color: #000; background: var(--yellow);
+      padding: 4px 10px; border-radius: 99px; margin-bottom: 14px;
+    }
+    h1 { font-size: 24px; margin: 0 0 8px; font-weight: 700; }
+    p { font-size: 14px; line-height: 1.45; color: var(--muted); margin: 0 0 20px; }
+    label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+    select {
+      width: 100%; padding: 14px 16px; border-radius: 14px; border: 1px solid #333;
+      background: #141417; color: var(--text); font-size: 16px; font-weight: 600;
+      margin-bottom: 20px; appearance: none;
+    }
+    .btn {
+      width: 100%; padding: 16px; border-radius: 16px; border: none; font-size: 16px;
+      font-weight: 700; cursor: pointer; margin-bottom: 12px; transition: transform 0.1s;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn-client { background: var(--yellow); color: #000; }
+    .btn-driver { background: #2C2C32; color: var(--text); border: 1px solid #3E3E46; }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 12px; text-align: center; }
+
+    /* Активный экран */
+    #activeView {
+      display: none; position: fixed; inset: 0; flex-direction: column;
+      align-items: center; justify-content: space-between; padding: 48px 24px 36px;
+      text-align: center;
+    }
+    .role-pill {
+      padding: 8px 16px; border-radius: 99px; background: rgba(20,20,24,0.82);
+      color: #fff; font-size: 14px; font-weight: 600; backdrop-filter: blur(8px);
+    }
+    .pulse-ring {
+      width: 96px; height: 96px; border-radius: 50%; border: 3px solid rgba(255,255,255,0.25);
+      display: flex; align-items: center; justify-content: center; font-size: 13px;
+      color: rgba(255,255,255,0.7); transition: transform 0.06s, background 0.06s;
+    }
+    .stop-btn {
+      padding: 14px 28px; border-radius: 99px; border: 1px solid rgba(255,255,255,0.25);
+      background: rgba(20,20,24,0.82); color: #fff; font-size: 14px; font-weight: 600;
+      cursor: pointer; backdrop-filter: blur(8px);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="panel" id="setupView">
+    <span class="badge">LASER 3.1 · Live Demo</span>
+    <h1>«Отзыв в такт»</h1>
+    <p>Откройте эту страницу на двух смартфонах, выберите один код заказа и запустите разные роли. Сеть между телефонами не используется — синхронизация идёт по системным часам.</p>
+
+    <label for="patternSelect">Индивидуальный ритм поездки</label>
+    <select id="patternSelect">
+      <option value="0">Заказ #104 · Двойной импульс (тик-тик … пауза)</option>
+      <option value="1">Заказ #209 · Синкопа (тик … тик-тик … пауза)</option>
+      <option value="2">Заказ #315 · Редкий маяк (одиночный в 1.8 с)</option>
+    </select>
+
+    <button class="btn btn-client" onclick="startSession('client')">Я Пассажир (экран-маяк)</button>
+    <button class="btn btn-driver" onclick="startSession('driver')">Я Водитель (звуковой тик)</button>
+
+    <div class="hint">Безопасная частота &le; 2.8 Гц · На iOS включите звук рычажком сбоку</div>
+  </div>
+
+  <div id="activeView">
+    <div class="role-pill" id="roleLabel">Режим</div>
+    <div class="pulse-ring" id="pulseIndicator">ТАКТ</div>
+    <button class="stop-btn" onclick="stopSession()">Остановить демо</button>
+  </div>
+
+  <script>
+    // Расписания слотов по 360 мс (безопасно: < 3 вспышек в секунду, разные периоды против коллизий)
+    const PATTERNS = [
+      [1, 1, 0, 0, 0, 0],          // Двойной импульс, цикл 2.16 с
+      [1, 0, 1, 1, 0, 0, 0, 0],    // Синкопа, цикл 2.88 с
+      [1, 0, 0, 0, 0]              // Одиночный редкий, цикл 1.80 с
+    ];
+    const SLOT_MS = 360;
+    const FLASH_HOLD_MS = 140;
+
+    let running = false;
+    let audioCtx = null;
+    let wakeLock = null;
+    let lastTriggeredSlot = -1;
+
+    function playDriverTick() {
+      if (!audioCtx) return;
+      const now = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      // Мягкий деревянный/акустический «тик», хорошо слышимый сквозь шум дороги и не режущий слух
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(1150, now);
+      osc.frequency.exponentialRampToValueAtTime(620, now + 0.055);
+      gain.gain.setValueAtTime(0.45, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(now);
+      osc.stop(now + 0.065);
+    }
+
+    async function startSession(role) {
+      const patternIdx = Number(document.getElementById('patternSelect').value) || 0;
+      const pattern = PATTERNS[patternIdx];
+
+      document.getElementById('setupView').style.display = 'none';
+      const activeView = document.getElementById('activeView');
+      activeView.style.display = 'flex';
+
+      document.getElementById('roleLabel').textContent =
+        role === 'client'
+          ? 'Пассажир · Поднимите экран к дороге'
+          : 'Водитель · Глаза на дорогу, слушайте тик';
+
+      if (role === 'driver') {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AudioContextClass();
+        if (audioCtx.state === 'suspended') await audioCtx.resume();
+      }
+
+      if (navigator.wakeLock) {
+        try { wakeLock = await navigator.wakeLock.request('screen'); } catch (_) {}
+      }
+
+      running = true;
+      lastTriggeredSlot = -1;
+      const ring = document.getElementById('pulseIndicator');
+
+      function tickLoop() {
+        if (!running) return;
+        const nowMs = Date.now();
+        const currentSlot = Math.floor(nowMs / SLOT_MS);
+        const phaseInSlot = nowMs % SLOT_MS;
+        const isBeatSlot = pattern[currentSlot % pattern.length] === 1;
+        const isFlashActive = isBeatSlot && phaseInSlot < FLASH_HOLD_MS;
+
+        if (role === 'client') {
+          document.body.style.background = isFlashActive ? '#FFFFFF' : '#000000';
+          ring.style.transform = isFlashActive ? 'scale(1.22)' : 'scale(1)';
+          ring.style.background = isFlashActive ? 'rgba(0,0,0,0.85)' : 'transparent';
+        } else {
+          document.body.style.background = '#121214';
+          ring.style.transform = isFlashActive ? 'scale(1.18)' : 'scale(1)';
+          ring.style.background = isFlashActive ? 'rgba(252, 224, 0, 0.28)' : 'transparent';
+          if (isBeatSlot && currentSlot !== lastTriggeredSlot) {
+            lastTriggeredSlot = currentSlot;
+            playDriverTick();
+          }
+        }
+        requestAnimationFrame(tickLoop);
+      }
+
+      requestAnimationFrame(tickLoop);
+    }
+
+    function stopSession() {
+      running = false;
+      document.body.style.background = 'var(--bg)';
+      document.getElementById('activeView').style.display = 'none';
+      document.getElementById('setupView').style.display = 'block';
+      if (audioCtx) { audioCtx.close(); audioCtx = null; }
+      if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+    }
+  </script>
+</body>
+</html>
